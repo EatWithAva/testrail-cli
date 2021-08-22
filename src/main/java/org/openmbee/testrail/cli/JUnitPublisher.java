@@ -10,6 +10,7 @@ import org.openmbee.junit.model.JUnitError;
 import org.openmbee.junit.model.JUnitFailure;
 import org.openmbee.junit.model.JUnitTestCase;
 import org.openmbee.junit.model.JUnitTestSuite;
+import org.openmbee.junit.model.JUnitProperty;
 import org.openmbee.testrail.TestRailAPI;
 import org.openmbee.testrail.model.*;
 
@@ -47,6 +48,8 @@ public class JUnitPublisher implements Runnable {
     private static Option milestoneOption = Option.builder("m").longOpt("milestone").hasArg().argName("name").desc("(Optional) The name of the TestRail milestone to associate with the run.").build();
     private static Option runNameOption = Option.builder().longOpt("run-name").hasArg().argName("string").desc("(Optional) The name of the TestRail run. Defaults to current time in ISO-8601 format.").build();
     private static Option skipCloseRunOption = Option.builder().longOpt("skip-close-run").desc("(Optional) Providing this flag will keep the TestRail run open after adding test results.").type(Boolean.class).build();
+    private static Option chunkSizeOption = Option.builder("cs").longOpt("chunk-size").hasArg().argName("value").desc("Provide chunk size for uploading test results").type(Number.class).build();
+    private static Option noProperties = Option.builder().longOpt("no-properties").desc("(Optional) Remove properties from test suite report").type(Boolean.class).build();
 
     static {
         infoOptions.addOption(helpOption);
@@ -62,6 +65,8 @@ public class JUnitPublisher implements Runnable {
         options.addOption(milestoneOption);
         options.addOption(runNameOption);
         options.addOption(skipCloseRunOption);
+        options.addOption(chunkSizeOption);
+        options.addOption(noProperties);
     }
 
     private final TestRailAPI api;
@@ -69,6 +74,8 @@ public class JUnitPublisher implements Runnable {
     private final List<Path> reports;
     private final String milestoneName, runName;
     private final boolean skipCloseRun;
+    private final int chunkSize;
+    private final boolean noPropertiesValue;
 
     public static void main(String... args) throws ParseException, URISyntaxException, IOException {
         CommandLineParser parser = new DefaultParser();
@@ -118,7 +125,9 @@ public class JUnitPublisher implements Runnable {
         String milestone = line.getOptionValue(milestoneOption.getLongOpt());
         String runName = line.getOptionValue(runNameOption.getLongOpt());
         boolean skipCloseRun = line.hasOption(skipCloseRunOption.getLongOpt());
-        new JUnitPublisher(api, suiteId, planId, reports, milestone, runName, skipCloseRun).run();
+        int chunkSize = ((o = line.getParsedOptionValue(chunkSizeOption.getOpt())) != null ? (Number) o : 25).intValue();
+        boolean noPropertiesValue = line.hasOption(noProperties.getLongOpt());
+        new JUnitPublisher(api, suiteId, planId, reports, milestone, runName, skipCloseRun, chunkSize, noPropertiesValue).run();
     }
 
     @SneakyThrows({URISyntaxException.class, IOException.class, InterruptedException.class})
@@ -200,11 +209,26 @@ public class JUnitPublisher implements Runnable {
         requestRun.setName(runName != null ? runName : LocalDateTime.now().toString()).setDescription(jUnitTestSuites.entrySet().stream().map(entry -> {
             JUnitTestSuite jUnitTestSuite = entry.getValue();
             StringBuilder descriptionBuilder = new StringBuilder();
+
+            final List<JUnitProperty> filteredProperties;
+            if (jUnitTestSuite.getProperties() == null) {
+              filteredProperties = new ArrayList<>();
+            } else {
+              filteredProperties = jUnitTestSuite
+                .getProperties()
+                .stream()
+                .filter(p -> !p.getName().equals("java.class.path"))
+                .collect(Collectors.toList());
+            }
+
             descriptionBuilder.append("# ").append(entry.getKey()).append(" #").append(System.lineSeparator());
-            int propertyCount = jUnitTestSuite.getProperties() != null ? jUnitTestSuite.getProperties().size() : 0;
-            descriptionBuilder.append("__Properties:__ ").append(NumberFormat.getInstance().format(propertyCount)).append(System.lineSeparator());
-            if (propertyCount > 0) {
-                descriptionBuilder.append(formatCodeString(jUnitTestSuite.getProperties().stream().filter(p -> !p.getName().equals("java.class.path")).map(property -> property.getName() + "=" + property.getValue()).collect(Collectors.joining(System.lineSeparator())))).append(System.lineSeparator());
+            int propertyCount = filteredProperties.size();
+
+            if (!noPropertiesValue) {
+                descriptionBuilder.append("__Properties:__ ").append(NumberFormat.getInstance().format(propertyCount)).append(System.lineSeparator());
+                if (propertyCount > 0) {
+                    descriptionBuilder.append(formatCodeString(filteredProperties.stream().map(property -> property.getName() + "=" + property.getValue()).collect(Collectors.joining(System.lineSeparator())))).append(System.lineSeparator());
+                }
             }
             descriptionBuilder.append("__System Out:__ ").append(System.lineSeparator());
             descriptionBuilder.append(formatCodeString(jUnitTestSuite.getSystemOut())).append(System.lineSeparator());
@@ -220,7 +244,7 @@ public class JUnitPublisher implements Runnable {
 
         final int runId = run.getId();
 
-        chunked(testMap.entrySet().stream(), 100).forEach(chunk -> {
+        chunked(testMap.entrySet().stream(), chunkSize).forEach(chunk -> {
             final List<TestRailResult> requestResults = new ArrayList<>();
             chunk.forEach(entry -> {
                 JUnitTestCase jUnitTestCase = entry.getKey();
