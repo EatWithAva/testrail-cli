@@ -29,6 +29,7 @@ import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @RequiredArgsConstructor
 public class JUnitPublisher implements Runnable {
@@ -203,7 +204,7 @@ public class JUnitPublisher implements Runnable {
             int propertyCount = jUnitTestSuite.getProperties() != null ? jUnitTestSuite.getProperties().size() : 0;
             descriptionBuilder.append("__Properties:__ ").append(NumberFormat.getInstance().format(propertyCount)).append(System.lineSeparator());
             if (propertyCount > 0) {
-                descriptionBuilder.append(formatCodeString(jUnitTestSuite.getProperties().stream().map(property -> property.getName() + "=" + property.getValue()).collect(Collectors.joining(System.lineSeparator())))).append(System.lineSeparator());
+                descriptionBuilder.append(formatCodeString(jUnitTestSuite.getProperties().stream().filter(p -> !p.getName().equals("java.class.path")).map(property -> property.getName() + "=" + property.getValue()).collect(Collectors.joining(System.lineSeparator())))).append(System.lineSeparator());
             }
             descriptionBuilder.append("__System Out:__ ").append(System.lineSeparator());
             descriptionBuilder.append(formatCodeString(jUnitTestSuite.getSystemOut())).append(System.lineSeparator());
@@ -217,48 +218,53 @@ public class JUnitPublisher implements Runnable {
         List<TestRailTest> tests = api.getTests(run.getId());
         Map<JUnitTestCase, TestRailTest> testMap = caseMap.entrySet().stream().map(entry -> new AbstractMap.SimpleEntry<>(entry.getKey(), tests.stream().filter(test -> entry.getValue().getId().equals(test.getCaseId())).findAny().orElseThrow(() -> new NullPointerException("No TestRailTest matching JUnitTestCase " + entry.getKey().getName() + ".")))).collect(Collectors.toMap(AbstractMap.SimpleEntry::getKey, AbstractMap.SimpleEntry::getValue, throwingMerger(), LinkedHashMap::new));
 
-        final List<TestRailResult> requestResults = new ArrayList<>();
+        final int runId = run.getId();
 
-        testMap.entrySet().stream().forEach(entry -> {
-            JUnitTestCase jUnitTestCase = entry.getKey();
-            if (jUnitTestCase.getSkipped() == null) {
-                TestRailResult requestResult = new TestRailResult().setTestId(entry.getValue().getId()).setStatusId((jUnitTestCase.getErrors() == null || jUnitTestCase.getErrors().isEmpty()) && (jUnitTestCase.getFailures() == null || jUnitTestCase.getFailures().isEmpty()) ? 1 : 5);
-                int errorCount = jUnitTestCase.getErrors() != null ? jUnitTestCase.getErrors().size() : 0;
-                StringBuilder commentBuilder = new StringBuilder();
-                commentBuilder.append("__Errors:__ ").append(NumberFormat.getInstance().format(errorCount)).append(System.lineSeparator());
-                for (int i = 0; i < errorCount; i++) {
-                    JUnitError error = jUnitTestCase.getErrors().get(i);
-                    commentBuilder.append(i + 1).append(") Message: ").append(error.getMessage()).append(" | Type: ").append(error.getType()).append(System.lineSeparator());
-                    commentBuilder.append(formatCodeString(error.getValue())).append(System.lineSeparator());
-                }
-                int failureCount = jUnitTestCase.getFailures() != null ? jUnitTestCase.getFailures().size() : 0;
-                commentBuilder.append("__Failures:__ ").append(NumberFormat.getInstance().format(failureCount)).append(System.lineSeparator());
-                for (int i = 0; i < failureCount; i++) {
-                    JUnitFailure failure = jUnitTestCase.getFailures().get(i);
-                    commentBuilder.append(i + 1).append(") Message: ").append(failure.getMessage()).append(" | Type: ").append(failure.getType()).append(System.lineSeparator());
-                    commentBuilder.append(formatCodeString(failure.getValue())).append(System.lineSeparator());
-                }
-                commentBuilder.append("__System Out:__ ").append(System.lineSeparator());
-                commentBuilder.append(formatCodeString(jUnitTestCase.getSystemOut())).append(System.lineSeparator());
-                commentBuilder.append("__System Err:__ ").append(System.lineSeparator());
-                commentBuilder.append(formatCodeString(jUnitTestCase.getSystemErr()));
-                requestResult.setComment(commentBuilder.toString());
-                if (jUnitTestCase.getTime() != null) {
-                    requestResult.setElapsed(Math.max(Math.round(jUnitTestCase.getTime()), 1) + "s");
-                }
-                requestResult.setAssignedToId(user.getId());
+        chunked(testMap.entrySet().stream(), 100).forEach(chunk -> {
+            final List<TestRailResult> requestResults = new ArrayList<>();
+            chunk.forEach(entry -> {
+                JUnitTestCase jUnitTestCase = entry.getKey();
+                if (jUnitTestCase.getSkipped() == null) {
+                    TestRailResult requestResult = new TestRailResult().setTestId(entry.getValue().getId()).setStatusId((jUnitTestCase.getErrors() == null || jUnitTestCase.getErrors().isEmpty()) && (jUnitTestCase.getFailures() == null || jUnitTestCase.getFailures().isEmpty()) ? 1 : 5);
+                    int errorCount = jUnitTestCase.getErrors() != null ? jUnitTestCase.getErrors().size() : 0;
+                    StringBuilder commentBuilder = new StringBuilder();
+                    commentBuilder.append("__Errors:__ ").append(NumberFormat.getInstance().format(errorCount)).append(System.lineSeparator());
+                    for (int i = 0; i < errorCount; i++) {
+                        JUnitError error = jUnitTestCase.getErrors().get(i);
+                        commentBuilder.append(i + 1).append(") Message: ").append(error.getMessage()).append(" | Type: ").append(error.getType()).append(System.lineSeparator());
+                        commentBuilder.append(formatCodeString(error.getValue())).append(System.lineSeparator());
+                    }
+                    int failureCount = jUnitTestCase.getFailures() != null ? jUnitTestCase.getFailures().size() : 0;
+                    commentBuilder.append("__Failures:__ ").append(NumberFormat.getInstance().format(failureCount)).append(System.lineSeparator());
+                    for (int i = 0; i < failureCount; i++) {
+                        JUnitFailure failure = jUnitTestCase.getFailures().get(i);
+                        commentBuilder.append(i + 1).append(") Message: ").append(failure.getMessage()).append(" | Type: ").append(failure.getType()).append(System.lineSeparator());
+                        commentBuilder.append(formatCodeString(failure.getValue())).append(System.lineSeparator());
+                    }
+                    commentBuilder.append("__System Out:__ ").append(System.lineSeparator());
+                    commentBuilder.append(formatCodeString(jUnitTestCase.getSystemOut())).append(System.lineSeparator());
+                    commentBuilder.append("__System Err:__ ").append(System.lineSeparator());
+                    commentBuilder.append(formatCodeString(jUnitTestCase.getSystemErr()));
+                    requestResult.setComment(commentBuilder.toString());
+                    if (jUnitTestCase.getTime() != null) {
+                        requestResult.setElapsed(Math.max(Math.round(jUnitTestCase.getTime()), 1) + "s");
+                    }
+                    requestResult.setAssignedToId(user.getId());
 
-                requestResults.add(requestResult);
+                    requestResults.add(requestResult);
+                }
+            });
+
+            List<TestRailResult> results = new ArrayList<>();
+            try {
+              System.out.println("Uploading chunk of " + requestResults.size() + " test results");
+              results = api.addResults(requestResults, runId);
+              Thread.sleep(500L);
+            } catch (URISyntaxException | IOException | InterruptedException e) {
+              throw new RuntimeException(e);
             }
+
         });
-
-        List<TestRailResult> results = new ArrayList<>();
-
-        try {
-          results = api.addResults(requestResults, run.getId());
-        } catch (URISyntaxException | IOException e) {
-          throw new RuntimeException(e);
-        }
 
         if (!skipCloseRun) {
             run = api.closeRun(run);
@@ -267,6 +273,14 @@ public class JUnitPublisher implements Runnable {
         URIBuilder runUriBuilder = new URIBuilder(api.getUri());
         runUriBuilder.setParameter("/runs/view/" + run.getId(), null);
         System.out.println("Published test run on TestRail: " + runUriBuilder.build().toString());
+    }
+
+    public static <T> Stream<List<T>> chunked(Stream<T> stream, int chunkSize) {
+        AtomicInteger index = new AtomicInteger(0);
+
+        return stream.collect(Collectors.groupingBy(x -> index.getAndIncrement() / chunkSize))
+                .entrySet().stream()
+                .sorted(Map.Entry.comparingByKey()).map(Map.Entry::getValue);
     }
 
     private String formatCodeString(String code) {
