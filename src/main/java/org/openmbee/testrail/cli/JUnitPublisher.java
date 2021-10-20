@@ -3,8 +3,11 @@ package org.openmbee.testrail.cli;
 import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import org.apache.commons.cli.*;
+import org.apache.http.client.HttpClient;
 import org.apache.http.client.HttpResponseException;
 import org.apache.http.client.utils.URIBuilder;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.openmbee.junit.JUnitMarshalling;
 import org.openmbee.junit.model.JUnitError;
 import org.openmbee.junit.model.JUnitFailure;
@@ -126,7 +129,7 @@ public class JUnitPublisher implements Runnable {
 
         TestRailAPI api = new TestRailAPI(new URI(line.getOptionValue(hostOption.getOpt())), line.getOptionValue(userOption.getOpt()), password);
 
-        TestRail testRail = TestRail.builder(hostOption.getOpt(), userOption.getOpt(), password).build();
+        TestRail testRail = TestRail.builder(line.getOptionValue(hostOption.getOpt()), line.getOptionValue(userOption.getOpt()), password).build();
 
         int suiteId = ((Number) line.getParsedOptionValue(suiteOption.getOpt())).intValue();
         Object o;
@@ -155,6 +158,7 @@ public class JUnitPublisher implements Runnable {
 
             final Function<Section, TestRailSection> convert = s -> {
                 final TestRailSection trs = new TestRailSection();
+                trs.setName(s.getName());
                 trs.setDepth(s.getDepth());
                 trs.setDescription(s.getDescription());
                 trs.setDisplayOrder(s.getDisplayOrder());
@@ -193,7 +197,16 @@ public class JUnitPublisher implements Runnable {
             testRailSectionMap.put(name, section);
         }
 
-        final List<Case> cases = testRail.cases().list(suite.getProjectId(), suite.getId(), Collections.emptyList()).execute();
+        final CloseableHttpClient client = HttpClients.createDefault();
+
+        final List<CaseField> fields = testRail.caseFields().list().execute();
+
+        final List<Case> cases = testRail
+          .cases()
+          .list(suite.getProjectId(), suite.getId(), fields)
+          .execute()
+          .stream()
+          .collect(Collectors.toList());
 
         final Map<Integer, List<Case>> sectionIdToCases = cases.stream().collect(Collectors.groupingBy(c -> c.getSectionId()));
 
@@ -288,7 +301,25 @@ public class JUnitPublisher implements Runnable {
                 .setAssignedToId(user.getId()).setIncludeAll(false).setCaseIds(caseMap.values().stream().map(Case::getId).collect(Collectors.toList()));
         TestRailRun run = api.addRun(requestRun);
 
-        List<TestRailTest> tests = api.getTests(run.getId());
+        List<Test> tests2 = testRail.tests().list(run.getId()).execute();
+
+        List<TestRailTest> tests = tests2.stream().map(t2 -> {
+          final TestRailTest t = new TestRailTest();
+          t.setId(t2.getId());
+          t.setRefs(t2.getRefs());
+          t.setTitle(t2.getTitle());
+          t.setRunId(t2.getRunId());
+          t.setCaseId(t2.getCaseId());
+          t.setTypeId(t2.getTypeId());
+          t.setEstimate(t2.getEstimate());
+          t.setStatusId(t2.getStatusId());
+          t.setPriorityId(t2.getPriorityId());
+          t.setAssignedToId(t2.getAssignedtoId() + "");
+          t.setMilestoneId(t2.getMilestoneId());
+          return t;
+        }).collect(Collectors.toList());
+
+
         Map<JUnitTestCase, TestRailTest> testMap = caseMap.entrySet().stream().map(entry -> new AbstractMap.SimpleEntry<>(entry.getKey(), tests.stream().filter(test -> Integer.valueOf(entry.getValue().getId()).equals(test.getCaseId())).findAny().orElseThrow(() -> new NullPointerException("No TestRailTest matching JUnitTestCase " + entry.getKey().getName() + ".")))).collect(Collectors.toMap(AbstractMap.SimpleEntry::getKey, AbstractMap.SimpleEntry::getValue, throwingMerger(), LinkedHashMap::new));
 
         final int runId = run.getId();
