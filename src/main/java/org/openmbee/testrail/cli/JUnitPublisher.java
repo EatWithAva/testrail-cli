@@ -13,6 +13,10 @@ import org.openmbee.junit.model.JUnitTestSuite;
 import org.openmbee.junit.model.JUnitProperty;
 import org.openmbee.testrail.TestRailAPI;
 import org.openmbee.testrail.model.*;
+import com.codepine.api.testrail.TestRail;
+import com.codepine.api.testrail.Request;
+import com.codepine.api.testrail.TestRail.Sections;
+import com.codepine.api.testrail.model.*;
 
 import javax.xml.bind.JAXBException;
 import javax.xml.stream.XMLStreamException;
@@ -31,6 +35,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.concurrent.atomic.AtomicInteger;
+
 
 @RequiredArgsConstructor
 public class JUnitPublisher implements Runnable {
@@ -76,6 +81,7 @@ public class JUnitPublisher implements Runnable {
     private final boolean skipCloseRun;
     private final int chunkSize;
     private final boolean noPropertiesValue;
+    private final TestRail testRail;
 
     public static void main(String... args) throws ParseException, URISyntaxException, IOException {
         CommandLineParser parser = new DefaultParser();
@@ -119,6 +125,9 @@ public class JUnitPublisher implements Runnable {
         }
 
         TestRailAPI api = new TestRailAPI(new URI(line.getOptionValue(hostOption.getOpt())), line.getOptionValue(userOption.getOpt()), password);
+
+        TestRail testRail = TestRail.builder(line.getOptionValue(hostOption.getOpt()), line.getOptionValue(userOption.getOpt()), password).build();
+
         int suiteId = ((Number) line.getParsedOptionValue(suiteOption.getOpt())).intValue();
         Object o;
         int planId = ((o = line.getParsedOptionValue(planOption.getOpt())) != null ? (Number) o : -1).intValue();
@@ -127,7 +136,7 @@ public class JUnitPublisher implements Runnable {
         boolean skipCloseRun = line.hasOption(skipCloseRunOption.getLongOpt());
         int chunkSize = ((o = line.getParsedOptionValue(chunkSizeOption.getOpt())) != null ? (Number) o : 25).intValue();
         boolean noPropertiesValue = line.hasOption(noProperties.getLongOpt());
-        new JUnitPublisher(api, suiteId, planId, reports, milestone, runName, skipCloseRun, chunkSize, noPropertiesValue).run();
+        new JUnitPublisher(api, suiteId, planId, reports, milestone, runName, skipCloseRun, chunkSize, noPropertiesValue, testRail).run();
     }
 
     @SneakyThrows({URISyntaxException.class, IOException.class, InterruptedException.class})
@@ -138,10 +147,27 @@ public class JUnitPublisher implements Runnable {
             throw new IllegalArgumentException("No test suite found for id " + suiteId);
         }
 
+
+        java.util.List<Section> sections;
         List<TestRailSection> testRailSections;
         try {
-            testRailSections = api.getSections(suite.getProjectId(), suite.getId());
-        } catch (HttpResponseException e) {
+            sections = testRail.sections().list(suite.getProjectId(), suite.getId()).execute();
+
+            final Function<Section, TestRailSection> convert = s -> {
+                final TestRailSection trs = new TestRailSection();
+                trs.setName(s.getName());
+                trs.setDepth(s.getDepth());
+                trs.setDescription(s.getDescription());
+                trs.setDisplayOrder(s.getDisplayOrder());
+                trs.setId(s.getId());
+                trs.setParentId(s.getParentId() + "");
+                trs.setSuiteId(s.getSuiteId());
+
+                return trs;
+            };
+
+            testRailSections = sections.stream().map(convert).collect(Collectors.toList());
+        } catch (final Exception e) {
             testRailSections = new ArrayList<>(reports.size());
         }
         Map<String, JUnitTestSuite> jUnitTestSuites = reports.stream().map(r -> {
@@ -168,20 +194,49 @@ public class JUnitPublisher implements Runnable {
             testRailSectionMap.put(name, section);
         }
 
-        Map<TestRailSection, List<TestRailCase>> testRailCaseMap = new LinkedHashMap<>(testRailSectionMap.size());
-        Map<JUnitTestCase, TestRailCase> caseMap = new LinkedHashMap<>(jUnitTestCases.size());
+        final List<CaseField> fields = testRail.caseFields().list().execute();
+
+        final List<Case> cases = testRail
+          .cases()
+          .list(suite.getProjectId(), suite.getId(), fields)
+          .execute()
+          .stream()
+          .collect(Collectors.toList());
+
+        final Map<Integer, List<Case>> sectionIdToCases = cases.stream().collect(Collectors.groupingBy(c -> c.getSectionId()));
+
+        Map<TestRailSection, List<Case>> testRailCaseMap = new LinkedHashMap<>(testRailSectionMap.size());
+
+        Map<JUnitTestCase, Case> caseMap = new LinkedHashMap<>(jUnitTestCases.size());
         for (Map.Entry<String, List<JUnitTestCase>> entry : jUnitTestCaseMap.entrySet()) {
             TestRailSection section = testRailSectionMap.get(entry.getKey());
-            List<TestRailCase> testRailCases = api.getCases(suite.getProjectId(), suite.getId(), section.getId());
+
+            final List<Case> testRailCases;
+
+            if (sectionIdToCases.containsKey(section.getId())) {
+                testRailCases = sectionIdToCases.get(section.getId());
+            } else {
+                testRailCases = Collections.emptyList();
+            }
+
             testRailCaseMap.put(section, testRailCases);
             for (JUnitTestCase jUnitTestCase : entry.getValue()) {
-                TestRailCase testRailCase = testRailCases.stream().filter(c -> c.getTitle().equals(jUnitTestCase.getName()) || c.getTitle().contains("@" + jUnitTestCase.getName())).findFirst().orElse(null);
+                Case testRailCase = testRailCases.stream().filter(c -> c.getTitle().equals(jUnitTestCase.getName()) || c.getTitle().contains("@" + jUnitTestCase.getName())).findFirst().orElse(null);
+
                 if (testRailCase == null) {
                     TestRailCase requestCase = new TestRailCase().setSuiteId(suite.getId()).setSectionId(section.getId()).setTitle(jUnitTestCase.getName());
+
                     final long sleepMillis = 750L;
                     System.out.println("Sleeping " + sleepMillis + " milliseconds and then adding case: " + entry.getKey() + "#" + jUnitTestCase.getName());
                     Thread.sleep(sleepMillis);
-                    testRailCase = api.addCase(requestCase);
+
+                    final TestRailCase added = api.addCase(requestCase);
+                    testRailCase = new Case();
+
+                    testRailCase.setId(added.getId());
+                    testRailCase.setTitle(added.getTitle());
+                    testRailCase.setSectionId(added.getSectionId());
+                    testRailCase.setSuiteId(added.getSuiteId());
                 }
                 caseMap.put(jUnitTestCase, testRailCase);
             }
@@ -236,11 +291,29 @@ public class JUnitPublisher implements Runnable {
             descriptionBuilder.append(formatCodeString(jUnitTestSuite.getSystemErr())).append(System.lineSeparator());
             return descriptionBuilder.toString();
         }).collect(Collectors.joining(System.lineSeparator())))
-                .setAssignedToId(user.getId()).setIncludeAll(false).setCaseIds(caseMap.values().stream().map(TestRailCase::getId).collect(Collectors.toList()));
+                .setAssignedToId(user.getId()).setIncludeAll(false).setCaseIds(caseMap.values().stream().map(Case::getId).collect(Collectors.toList()));
         TestRailRun run = api.addRun(requestRun);
 
-        List<TestRailTest> tests = api.getTests(run.getId());
-        Map<JUnitTestCase, TestRailTest> testMap = caseMap.entrySet().stream().map(entry -> new AbstractMap.SimpleEntry<>(entry.getKey(), tests.stream().filter(test -> entry.getValue().getId().equals(test.getCaseId())).findAny().orElseThrow(() -> new NullPointerException("No TestRailTest matching JUnitTestCase " + entry.getKey().getName() + ".")))).collect(Collectors.toMap(AbstractMap.SimpleEntry::getKey, AbstractMap.SimpleEntry::getValue, throwingMerger(), LinkedHashMap::new));
+        List<Test> tests2 = testRail.tests().list(run.getId()).execute();
+
+        List<TestRailTest> tests = tests2.stream().map(t2 -> {
+          final TestRailTest t = new TestRailTest();
+          t.setId(t2.getId());
+          t.setRefs(t2.getRefs());
+          t.setTitle(t2.getTitle());
+          t.setRunId(t2.getRunId());
+          t.setCaseId(t2.getCaseId());
+          t.setTypeId(t2.getTypeId());
+          t.setEstimate(t2.getEstimate());
+          t.setStatusId(t2.getStatusId());
+          t.setPriorityId(t2.getPriorityId());
+          t.setAssignedToId(t2.getAssignedtoId() + "");
+          t.setMilestoneId(t2.getMilestoneId());
+          return t;
+        }).collect(Collectors.toList());
+
+
+        Map<JUnitTestCase, TestRailTest> testMap = caseMap.entrySet().stream().map(entry -> new AbstractMap.SimpleEntry<>(entry.getKey(), tests.stream().filter(test -> Integer.valueOf(entry.getValue().getId()).equals(test.getCaseId())).findAny().orElseThrow(() -> new NullPointerException("No TestRailTest matching JUnitTestCase " + entry.getKey().getName() + ".")))).collect(Collectors.toMap(AbstractMap.SimpleEntry::getKey, AbstractMap.SimpleEntry::getValue, throwingMerger(), LinkedHashMap::new));
 
         final int runId = run.getId();
 
