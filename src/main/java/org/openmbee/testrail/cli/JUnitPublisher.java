@@ -3,11 +3,8 @@ package org.openmbee.testrail.cli;
 import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import org.apache.commons.cli.*;
-import org.apache.http.client.HttpClient;
 import org.apache.http.client.HttpResponseException;
 import org.apache.http.client.utils.URIBuilder;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
 import org.openmbee.junit.JUnitMarshalling;
 import org.openmbee.junit.model.JUnitError;
 import org.openmbee.junit.model.JUnitFailure;
@@ -197,8 +194,6 @@ public class JUnitPublisher implements Runnable {
             testRailSectionMap.put(name, section);
         }
 
-        final CloseableHttpClient client = HttpClients.createDefault();
-
         final List<CaseField> fields = testRail.caseFields().list().execute();
 
         final List<Case> cases = testRail
@@ -215,8 +210,6 @@ public class JUnitPublisher implements Runnable {
         Map<JUnitTestCase, Case> caseMap = new LinkedHashMap<>(jUnitTestCases.size());
         for (Map.Entry<String, List<JUnitTestCase>> entry : jUnitTestCaseMap.entrySet()) {
             TestRailSection section = testRailSectionMap.get(entry.getKey());
-
-            System.out.println("Getting existing cases for section: " + section.getDescription() + ", " + section.getName());
 
             final List<Case> testRailCases;
 
