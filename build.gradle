@@ -43,6 +43,8 @@ dependencies {
     compile group: 'org.openmbee.testrail', name: 'testrail-client-wrapper', version: '1.1.1'
     compile group: 'com.codepine.api', name: 'testrail-api-java-client', version: '2.0.2'
 
+    compile group: 'javax.activation', name: 'javax.activation-api', version: '1.2.0'
+
     compile group: 'commons-cli', name: 'commons-cli', version: '1.4'
 }
 
